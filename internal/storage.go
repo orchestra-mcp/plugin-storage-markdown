@@ -75,7 +75,9 @@ func (s *StoragePlugin) Write(_ context.Context, req *pluginv1.StorageWriteReque
 	currentVersion, _ := readVersion(filePath)
 
 	// CAS versioning logic.
-	if req.ExpectedVersion == 0 {
+	if req.ExpectedVersion == -1 {
+		// Upsert: write unconditionally (create or overwrite).
+	} else if req.ExpectedVersion == 0 {
 		// Create new: fail if the file already exists.
 		if _, err := os.Stat(filePath); err == nil {
 			return &pluginv1.StorageWriteResponse{
