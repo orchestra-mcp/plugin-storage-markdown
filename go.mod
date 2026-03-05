@@ -3,8 +3,8 @@ module github.com/orchestra-mcp/plugin-storage-markdown
 go 1.23
 
 require (
-	github.com/orchestra-mcp/gen-go v1.0.0
-	github.com/orchestra-mcp/sdk-go v1.0.0
+	github.com/orchestra-mcp/gen-go v1.0.2
+	github.com/orchestra-mcp/sdk-go v1.0.2
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
