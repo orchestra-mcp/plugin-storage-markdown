@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
@@ -409,6 +410,166 @@ func TestDeleteNonexistent(t *testing.T) {
 	}
 }
 
+func TestDeleteCleansUpVersionSidecar(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+	ctx := context.Background()
+
+	path := "projects/test-app/with-version.md"
+
+	// Write a file (creates version sidecar).
+	writeResp, err := sp.Write(ctx, &pluginv1.StorageWriteRequest{
+		Path:            path,
+		Content:         []byte("# Has version\n"),
+		ExpectedVersion: 0,
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !writeResp.Success {
+		t.Fatalf("Write failed: %s", writeResp.Error)
+	}
+	if writeResp.NewVersion != 1 {
+		t.Errorf("expected version 1, got %d", writeResp.NewVersion)
+	}
+
+	// Verify the version sidecar exists by reading version.
+	readResp, err := sp.Read(ctx, &pluginv1.StorageReadRequest{Path: path})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if readResp.Version != 1 {
+		t.Errorf("expected version 1, got %d", readResp.Version)
+	}
+
+	// Delete the file — should also clean up version sidecar.
+	delResp, err := sp.Delete(ctx, &pluginv1.StorageDeleteRequest{Path: path})
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !delResp.Success {
+		t.Error("expected delete success=true")
+	}
+
+	// Verify file is gone.
+	_, err = sp.Read(ctx, &pluginv1.StorageReadRequest{Path: path})
+	if err == nil {
+		t.Error("expected error reading deleted file")
+	}
+}
+
+func TestListSkipsVersionSidecars(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+	ctx := context.Background()
+
+	// Write a file with versioning (creates .version sidecar).
+	writeResp, err := sp.Write(ctx, &pluginv1.StorageWriteRequest{
+		Path:            "projects/test/file.md",
+		Content:         []byte("# File\n"),
+		ExpectedVersion: 0,
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !writeResp.Success {
+		t.Fatalf("Write failed: %s", writeResp.Error)
+	}
+
+	// List should NOT include .version files.
+	listResp, err := sp.List(ctx, &pluginv1.StorageListRequest{
+		Prefix:  "projects/test/",
+		Pattern: "*",
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	for _, entry := range listResp.Entries {
+		if strings.HasSuffix(entry.Path, ".version") {
+			t.Errorf("list should not include version sidecar: %s", entry.Path)
+		}
+	}
+	if len(listResp.Entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(listResp.Entries))
+	}
+}
+
+func TestReadRespectsContextCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+
+	// Write a file so there's something to read.
+	ctx := context.Background()
+	sp.Write(ctx, &pluginv1.StorageWriteRequest{
+		Path:            "projects/test/ctx.md",
+		Content:         []byte("# Test\n"),
+		ExpectedVersion: 0,
+	})
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sp.Read(cancelledCtx, &pluginv1.StorageReadRequest{Path: "projects/test/ctx.md"})
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+	if !strings.Contains(err.Error(), "context cancel") {
+		t.Errorf("expected context cancelled error, got: %v", err)
+	}
+}
+
+func TestWriteRespectsContextCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sp.Write(cancelledCtx, &pluginv1.StorageWriteRequest{
+		Path:            "projects/test/ctx.md",
+		Content:         []byte("# Test\n"),
+		ExpectedVersion: 0,
+	})
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
+func TestDeleteRespectsContextCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sp.Delete(cancelledCtx, &pluginv1.StorageDeleteRequest{Path: "projects/test/ctx.md"})
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
+func TestListRespectsContextCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+
+	// Write some files so Walk has something to iterate.
+	ctx := context.Background()
+	sp.Write(ctx, &pluginv1.StorageWriteRequest{
+		Path:            "projects/test/a.md",
+		Content:         []byte("# A\n"),
+		ExpectedVersion: 0,
+	})
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sp.List(cancelledCtx, &pluginv1.StorageListRequest{Prefix: "projects/test/"})
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
 func TestEmptyPath(t *testing.T) {
 	workspace := t.TempDir()
 	sp := NewStoragePlugin(workspace)
@@ -417,5 +578,55 @@ func TestEmptyPath(t *testing.T) {
 	_, err := sp.Read(ctx, &pluginv1.StorageReadRequest{Path: ""})
 	if err == nil {
 		t.Error("expected error for empty path")
+	}
+}
+
+func TestPathTooLong(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+	ctx := context.Background()
+
+	longPath := strings.Repeat("a/", 2100) // > 4096 chars
+	_, err := sp.Read(ctx, &pluginv1.StorageReadRequest{Path: longPath})
+	if err == nil {
+		t.Error("expected error for path exceeding max length")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("expected 'too long' error, got: %v", err)
+	}
+}
+
+func TestGlobPatternTooLong(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+	ctx := context.Background()
+
+	longPattern := strings.Repeat("*", 300) // > 256 chars
+	_, err := sp.List(ctx, &pluginv1.StorageListRequest{
+		Prefix:  "projects/test/",
+		Pattern: longPattern,
+	})
+	if err == nil {
+		t.Error("expected error for glob pattern exceeding max length")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("expected 'too long' error, got: %v", err)
+	}
+}
+
+func TestInvalidGlobPattern(t *testing.T) {
+	workspace := t.TempDir()
+	sp := NewStoragePlugin(workspace)
+	ctx := context.Background()
+
+	_, err := sp.List(ctx, &pluginv1.StorageListRequest{
+		Prefix:  "projects/test/",
+		Pattern: "[invalid",
+	})
+	if err == nil {
+		t.Error("expected error for invalid glob pattern")
+	}
+	if !strings.Contains(err.Error(), "invalid glob pattern") {
+		t.Errorf("expected 'invalid glob pattern' error, got: %v", err)
 	}
 }

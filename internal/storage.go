@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,7 +34,10 @@ func NewStoragePlugin(workspace string) *StoragePlugin {
 }
 
 // Read loads a markdown file from disk, parsing its META header and body.
-func (s *StoragePlugin) Read(_ context.Context, req *pluginv1.StorageReadRequest) (*pluginv1.StorageReadResponse, error) {
+func (s *StoragePlugin) Read(ctx context.Context, req *pluginv1.StorageReadRequest) (*pluginv1.StorageReadResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before read: %w", err)
+	}
 	filePath, err := resolvePath(s.workspace, req.Path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
@@ -60,7 +64,10 @@ func (s *StoragePlugin) Read(_ context.Context, req *pluginv1.StorageReadRequest
 
 // Write persists metadata and body to a markdown file on disk with CAS
 // (compare-and-swap) versioning.
-func (s *StoragePlugin) Write(_ context.Context, req *pluginv1.StorageWriteRequest) (*pluginv1.StorageWriteResponse, error) {
+func (s *StoragePlugin) Write(ctx context.Context, req *pluginv1.StorageWriteRequest) (*pluginv1.StorageWriteResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before write: %w", err)
+	}
 	filePath, err := resolvePath(s.workspace, req.Path)
 	if err != nil {
 		return &pluginv1.StorageWriteResponse{
@@ -137,7 +144,10 @@ func (s *StoragePlugin) Write(_ context.Context, req *pluginv1.StorageWriteReque
 }
 
 // Delete removes a markdown file and its version sidecar from disk.
-func (s *StoragePlugin) Delete(_ context.Context, req *pluginv1.StorageDeleteRequest) (*pluginv1.StorageDeleteResponse, error) {
+func (s *StoragePlugin) Delete(ctx context.Context, req *pluginv1.StorageDeleteRequest) (*pluginv1.StorageDeleteResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before delete: %w", err)
+	}
 	filePath, err := resolvePath(s.workspace, req.Path)
 	if err != nil {
 		return &pluginv1.StorageDeleteResponse{Success: false}, fmt.Errorf("resolve path: %w", err)
@@ -154,14 +164,19 @@ func (s *StoragePlugin) Delete(_ context.Context, req *pluginv1.StorageDeleteReq
 		return &pluginv1.StorageDeleteResponse{Success: false}, fmt.Errorf("delete file: %w", err)
 	}
 
-	// Remove the version sidecar (ignore errors if it does not exist).
-	_ = os.Remove(versionPath(filePath))
+	// Remove the version sidecar — not-exist is expected, log other errors.
+	if err := os.Remove(versionPath(filePath)); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to remove version sidecar", "path", versionPath(filePath), "error", err)
+	}
 
 	return &pluginv1.StorageDeleteResponse{Success: true}, nil
 }
 
 // List enumerates markdown files under the given prefix directory.
-func (s *StoragePlugin) List(_ context.Context, req *pluginv1.StorageListRequest) (*pluginv1.StorageListResponse, error) {
+func (s *StoragePlugin) List(ctx context.Context, req *pluginv1.StorageListRequest) (*pluginv1.StorageListResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before list: %w", err)
+	}
 	prefix := req.Prefix
 	if prefix == "" {
 		prefix = "."
@@ -172,17 +187,29 @@ func (s *StoragePlugin) List(_ context.Context, req *pluginv1.StorageListRequest
 		return nil, fmt.Errorf("resolve prefix: %w", err)
 	}
 
-	// Determine the glob pattern for matching.
+	// Determine and validate the glob pattern for matching.
 	pattern := req.Pattern
 	if pattern == "" {
 		pattern = "*.md"
+	}
+	if len(pattern) > 256 {
+		return nil, fmt.Errorf("glob pattern too long (%d > 256)", len(pattern))
+	}
+	// Validate pattern syntax before walking the filesystem.
+	if _, err := filepath.Match(pattern, "test"); err != nil {
+		return nil, fmt.Errorf("invalid glob pattern %q: %w", pattern, err)
 	}
 
 	var entries []*pluginv1.StorageEntry
 
 	err = filepath.Walk(basePath, func(path string, info os.FileInfo, walkErr error) error {
+		// Abort walk if context is cancelled.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if walkErr != nil {
-			return nil // skip inaccessible entries
+			slog.Warn("skipping inaccessible path", "path", path, "error", walkErr)
+			return nil
 		}
 		if info.IsDir() {
 			return nil
@@ -196,6 +223,7 @@ func (s *StoragePlugin) List(_ context.Context, req *pluginv1.StorageListRequest
 		// Match against the pattern.
 		matched, matchErr := filepath.Match(pattern, filepath.Base(path))
 		if matchErr != nil {
+			slog.Warn("bad glob pattern", "pattern", pattern, "error", matchErr)
 			return nil
 		}
 		if !matched {
@@ -206,6 +234,7 @@ func (s *StoragePlugin) List(_ context.Context, req *pluginv1.StorageListRequest
 		projectsBase := filepath.Join(s.workspace, projectsDir)
 		relPath, relErr := filepath.Rel(projectsBase, path)
 		if relErr != nil {
+			slog.Warn("cannot compute relative path", "path", path, "error", relErr)
 			return nil
 		}
 

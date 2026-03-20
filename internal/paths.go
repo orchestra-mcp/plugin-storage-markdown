@@ -13,9 +13,15 @@ const projectsDir = ".projects"
 // resolvePath joins the workspace root with the .projects directory and the
 // given storage path. It validates that the resolved path does not escape the
 // workspace using path traversal.
+// maxStoragePathLen is the maximum allowed length for a storage path.
+const maxStoragePathLen = 4096
+
 func resolvePath(workspace, storagePath string) (string, error) {
 	if storagePath == "" {
 		return "", fmt.Errorf("storage path must not be empty")
+	}
+	if len(storagePath) > maxStoragePathLen {
+		return "", fmt.Errorf("storage path too long (%d > %d)", len(storagePath), maxStoragePathLen)
 	}
 
 	// Reject paths that contain ".." components to prevent directory traversal.
